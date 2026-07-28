@@ -1,0 +1,1 @@
+from .data import get_multiple_stocks_data
