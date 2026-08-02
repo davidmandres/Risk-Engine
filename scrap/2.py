@@ -4,9 +4,10 @@ import numpy.typing as npt
 
 from data.data import get_multiple_stocks_data
 
-
 class GBMRiskEngine:
-    ROLLING_PERIOD = 60
+    ROLLING_PERIODS = (20, 60)
+    TIME_HORIZONS = (1, 10)
+    ALPHAS = (0.05, 0.01)
     DAILY = 252
     N_PATHS = 10_000
 
@@ -74,40 +75,56 @@ tickers = ["SPY", "GLD", "NVDA", "GOOGL", "BTC-USD"]
 data = get_multiple_stocks_data(tickers, "2016-06-01", "2026-06-01", "1d")
 
 prices = {}
+log_returns = {}
+sigmas_by_window = {}
 paths_by_ticker = {}
-var_results = {}
-es_results = {}
+results = {}
 
 for ticker in tickers:
     curr_data = data[ticker]
     prices[ticker] = curr_data["Close"]
 
-    lr = np.diff(np.log(prices[ticker].values))
-
-    mu_annual = lr.mean() * risk_eng.DAILY
-    sigma_annual = lr.rolling(risk_eng.ROLLING_PERIOD).std().dropna().iloc[-1] * np.sqrt(risk_eng.DAILY)
-
-    paths = risk_eng.simulate_gbm(
-        S0=float(prices[ticker].iloc[-1]),
-        mu_annual=float(mu_annual),
-        sigma_annual=float(sigma_annual),
-        T=1.0,
-        N=risk_eng.DAILY,
-        n_paths=risk_eng.N_PATHS
+    lr = pd.Series(
+        np.diff(np.log(prices[ticker].values)),
+        index=prices[ticker].index[1:]
     )
-    paths_by_ticker[ticker] = paths
+    log_returns[ticker] = lr
 
-    v95_1, e95_1 = risk_eng.var_es(paths, 1, 0.05)
-    v99_1, e99_1 = risk_eng.var_es(paths, 1, 0.01)
-    v95_10, e95_10 = risk_eng.var_es(paths, 10, 0.05)
-    v99_10, e99_10 = risk_eng.var_es(paths, 10, 0.01)
+    mu_annual = float(lr.mean() * risk_eng.DAILY)
 
-    var_results[ticker] = {
-        "1d": {"var_95": v95_1, "var_99": v99_1},
-        "10d": {"var_95": v95_10, "var_99": v99_10},
+    sigmas_by_window[ticker] = {
+        f"vol_{window}d": float(
+            lr.rolling(window).std().dropna().iloc[-1] * np.sqrt(risk_eng.DAILY)
+        )
+        for window in risk_eng.ROLLING_PERIODS
     }
 
-    es_results[ticker] = {
-        "1d": {"es_95": e95_1, "es_99": e99_1},
-        "10d": {"es_95": e95_10, "es_99": e99_10},
-    }
+    paths_by_ticker[ticker] = {}
+    results[ticker] = {}
+
+    for window, sigma_annual in sigmas_by_window[ticker].items():
+        paths = risk_eng.simulate_gbm(
+            S0=prices[ticker].iloc[-1],
+            mu_annual=mu_annual,
+            sigma_annual=sigma_annual,
+            T=1.0,
+            N=risk_eng.DAILY,
+            n_paths=risk_eng.N_PATHS
+        )
+
+        paths_by_ticker[ticker][window] = paths
+        results[ticker][window] = {}
+
+        for horizon in risk_eng.TIME_HORIZONS:
+            horizon_key = f"{horizon}d"
+            results[ticker][window][horizon_key] = {}
+
+            for alpha in risk_eng.ALPHAS:
+                var, es = risk_eng.var_es(paths, horizon, alpha)
+                conf = int((1 - alpha) * 100)
+
+                results[ticker][window][horizon_key][f"var_{conf}"] = var
+                results[ticker][window][horizon_key][f"es_{conf}"] = es
+
+
+                
