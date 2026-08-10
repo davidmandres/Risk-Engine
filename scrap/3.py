@@ -2,16 +2,19 @@
 import numpy as np
 import pandas as pd
 import numpy.typing as npt
+import scipy.stats as stats
 
 from data.data import get_multiple_stocks_data
 
 class EWMAEngine:
     ROLLING_PERIODS = (20, 60)
     TIME_HORIZONS = (1, 10)
-    ALPHAS = (0.05, 0.01)
+    ALPHAS = (0.95, 0.99) # the confidence levels for VaR and ES calculations
     DAILY = 252
     N_PATHS = 10_000
     LAMBDA_ = 0.94
+    T = 1.0  # Time to maturity in years for the simulation
+    N = 252  # Number of time steps in the simulation (daily steps for 1 year)
 
     def ewma_volatility(self, log_returns: pd.Series, lambda_: float = LAMBDA_) -> float:
         if (not 0 < lambda_ <= 1):
@@ -20,11 +23,11 @@ class EWMAEngine:
         squared_returns = log_returns ** 2
         last_return = squared_returns.iloc[-1]
         squared_returns = squared_returns.shift(1)
-        squared_returns = squared_returns.fillna(value=0)
+        squared_returns = squared_returns.fillna(value=log_returns.mean() ** 2)
         ewma_var = squared_returns.ewm(alpha=1 - lambda_, adjust=False).mean().iloc[-1] 
 
         forecast = (last_return * (1 - lambda_) + ewma_var  * lambda_) ** 0.5 * np.sqrt(self.DAILY)
-
+        
         return forecast
 
     def simulate_gbm(
@@ -62,12 +65,32 @@ class EWMAEngine:
         P0 = paths[0, 0]
         losses = P0 - paths[:, time_horizon]
 
-        var = np.percentile(losses, (1 - alpha) * 100)
+        var = np.percentile(losses, alpha * 100)
         es = losses[losses > var].mean()
 
         return float(var), float(es)
 
+    def var_es_parametric(
+        self,
+        paths: npt.NDArray[np.float64],
+        mu: float,
+        sigma: float,
+        T: float,
+        N: int,
+        time_horizon: int,
+        alpha: float
+    ) -> tuple[float, float]:
+        P0 = paths[0, 0]
+        delta_t = (T / N) * time_horizon
+        z_alpha = stats.norm.ppf(alpha)
+        adjusted_mu = delta_t * (mu - 0.5 * sigma ** 2)
+        adjusted_sigma = sigma * np.sqrt(delta_t)
+        z_star_alpha = stats.norm.pdf(z_alpha) / (1 - alpha)
 
+        var = -P0 * (adjusted_mu - adjusted_sigma * z_alpha)
+        es = -P0 * (adjusted_mu - adjusted_sigma * z_star_alpha)
+
+        return float(var), float(es)
 
 ewma_eng = EWMAEngine()
 
@@ -111,12 +134,14 @@ for ticker in tickers:
 
         for alpha in ewma_eng.ALPHAS:
             var, es = ewma_eng.var_es(paths, horizon, alpha)
-            conf = int((1 - alpha) * 100)
+            para_var, para_es = ewma_eng.var_es_parametric(paths, mu_annual, sigma_annual, ewma_eng.T, ewma_eng.N, horizon, alpha)
+            conf = int(alpha * 100)
 
             results[ticker][horizon_key][f"var_{conf}"] = var
             results[ticker][horizon_key][f"es_{conf}"] = es
+            results[ticker][horizon_key][f"para_var_{conf}"] = para_var
+            results[ticker][horizon_key][f"para_es_{conf}"] = para_es
 
-   
 print("EWMA Results:")
 for ticker in tickers:
     print(f"\nTicker: {ticker}")
@@ -124,11 +149,16 @@ for ticker in tickers:
         horizon_key = f"{horizon}d"
         print(f"  Horizon: {horizon_key}")
         for alpha in ewma_eng.ALPHAS:
-            conf = int((1 - alpha) * 100)
+            conf = int(alpha * 100)
             var = results[ticker][horizon_key][f"var_{conf}"]
             es = results[ticker][horizon_key][f"es_{conf}"]
+            para_var = results[ticker][horizon_key][f"para_var_{conf}"]
+            para_es = results[ticker][horizon_key][f"para_es_{conf}"]
             print(f"    Confidence Level: {conf}%")
             print(f"      VaR: {var:.2f}")
             print(f"      ES: {es:.2f}")
+            print(f"      Parametric VaR: {para_var:.2f}")
+            print(f"      Parametric ES: {para_es:.2f}")
+            print(f"      Difference between VaR and Parametric VaR: {var - para_var:.2f}")
+            print(f"      Difference between ES and Parametric ES: {es - para_es:.2f}")
         
-                
